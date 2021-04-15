@@ -1,0 +1,380 @@
+---
+title: "607 Assignment 10"
+author: "Claire Meyer"
+date: "4/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Sentiment Analysis
+
+In this document, we will recreate an example from *Text Mining with R*, which leverages 3 lexicons to evaluate a corpus, in this case Jane Austen's Emma. Then we will extend the analysis to another corpus, and apply a fourth lexicon to compare.
+
+```{r load-libs, echo=FALSE}
+library(tidytext)
+library(janeaustenr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(wordcloud)
+library(reshape2)
+library(gutenbergr)
+```
+
+## Recreating Text Mining with R Example Code
+
+To start, we'll recreate the textbook's example, which looks at Jane Austen's books. First, the textbook demonstrates how to configure the needed dataframe and do some lightweight analysis of overall sentiment for each book.
+
+```{r recreation}
+book <- austen_books()
+
+# First the textbook has us create a dataframe with a row for each word and its location in each 
+# novel.
+tidy_books <- austen_books() %>%
+  group_by(book) %>%
+  mutate(
+    linenumber = row_number(),
+    chapter = cumsum(str_detect(text, 
+                                regex("^chapter [\\divxlc]", 
+                                      ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+
+# Then the textbook has us filter for all words with 'joy' sentiment in the NRC lexicon.
+nrc_joy <- get_sentiments("nrc") %>% 
+  filter(sentiment == "joy")
+
+# Then we inner join that against the words in Jane Austen's Emma and count up instances.
+tidy_books %>%
+  filter(book == "Emma") %>%
+  inner_join(nrc_joy) %>%
+  count(word, sort = TRUE)
+
+# The textbook then has us use the 'Bing' lexicon to determine a sentiment score across each book.
+jane_austen_sentiment <- tidy_books %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(book, index = linenumber %/% 80, sentiment) %>% # this indexes every 80 lines so we can 
+# track sentiment as the books develop.
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+# Then we can plot this for each novel to see sentiment across the plot.
+ggplot(jane_austen_sentiment, aes(index, sentiment, fill = book)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~book, ncol = 2, scales = "free_x")
+```
+
+Then, the textbook demonstrates how to compare the three lexicons: 
+
+```{r lexi-compare}
+# First the textbook has us filter for Pride & Prejudice
+pride_prejudice <- tidy_books %>% 
+  filter(book == "Pride & Prejudice")
+
+# Then we set up dataframes with an 80 line index and associated sentiment score, first using 
+# AFINN then Bing + NRC.
+afinn <- pride_prejudice %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(index = linenumber %/% 80) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method = "AFINN")
+
+# Bing and NRC use binary sentiment vs AFINN's score so it requires different processing.
+bing_and_nrc <- bind_rows(
+  pride_prejudice %>% 
+    inner_join(get_sentiments("bing")) %>%
+    mutate(method = "Bing et al."),
+  pride_prejudice %>% 
+    inner_join(get_sentiments("nrc") %>% 
+                 filter(sentiment %in% c("positive", 
+                                         "negative"))
+    ) %>%
+    mutate(method = "NRC")) %>%
+  count(method, index = linenumber %/% 80, sentiment) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+# Then we can use a similar plot to the above to compare the overall sentiment score from each
+# lexicon.
+bind_rows(afinn, 
+          bing_and_nrc) %>%
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y")
+```
+Then, the textbook walks through how to count occurrences of words and show them in a wordcloud.
+
+```{r occurrences}
+# The textbook counts instances of words, associating them with their Bing sentiment.
+bing_word_counts <- tidy_books %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+# Then the book has us plot the ranked counts
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution to sentiment",
+       y = NULL)
+
+# The textbook called out that 'miss' is incorrectly coded as negative, when it's often used as a 
+# title. We can add it to stop words to be excluded.
+custom_stop_words <- bind_rows(tibble(word = c("miss"),  
+                                      lexicon = c("custom")), 
+                               stop_words)
+
+# Then the textbook introduces wordclouds.
+tidy_books %>%
+  anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+
+# We can also configure a word cloud for negative words and positive words.
+tidy_books %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("gray20", "gray80"),
+                   max.words = 100)
+```
+
+Then the textbook unnests further into sentences and chapters: 
+
+```{r sentences}
+# First the textbook shows how to unnest as sentences.
+p_andp_sentences <- tibble(text = prideprejudice) %>% 
+  unnest_tokens(sentence, text, token = "sentences")
+
+# Then the textbook shows how to use Regex to unnest as chapters.
+austen_chapters <- austen_books() %>%
+  group_by(book) %>%
+  unnest_tokens(chapter, text, token = "regex", 
+                pattern = "Chapter|CHAPTER [\\dIVXLC]") %>%
+  ungroup()
+
+# Then we can see which chapters have the highest % of negative words, using Bing lexicon.
+bingnegative <- get_sentiments("bing") %>% 
+  filter(sentiment == "negative")
+
+# We want to get total wordcounts per chapter to create our denominator
+wordcounts <- tidy_books %>%
+  group_by(book, chapter) %>%
+  summarize(words = n())
+
+tidy_books %>%
+  semi_join(bingnegative) %>%
+  group_by(book, chapter) %>%
+  summarize(negativewords = n()) %>%
+  left_join(wordcounts, by = c("book", "chapter")) %>%
+  mutate(ratio = negativewords/words) %>%
+  filter(chapter != 0) %>%
+  slice_max(ratio, n = 1) %>% 
+  ungroup()
+```
+
+## Extending
+
+I'm going to use the Gutenberg R package, which pulls in free e-texts from the Gutenberg project. I'll be using the Adventures of Sherlock Holmes, which is a collection of 6 Holmes stories.
+
+First we download the text: 
+
+```{r extend}
+sherlock_book <- gutenberg_download(1661)
+```
+
+Then we can recreate the setup tasks from the Jane Austen example, adjusting for the differences in this text, namely needing to add an 'Adventure' column to split up the stories, and then chapters using roman numerals.
+
+```{r setup}
+# First I'd like to split this corpus up into its component stories, or "adventures". This is 
+# complicated by the fact that Adventure titles differ, so we have to create some flexible Regex. 
+# To simplify, I'm going to drop the table of contents.
+
+sherlock_book <- sherlock_book[-c(1:24),]
+
+# Then we can use our 'or' regex to get both types of titles and split into Adventures
+tidy_sherlock <- sherlock_book %>%
+  mutate(
+    adventure = cumsum(str_detect(text, 
+                                regex("^ADVENTURE [MCDXVI]+|^[MCDXVI]+\\. [A-Z]"))))
+
+# Then we can split up the chapters within the stories
+tidy_sherlock <- tidy_sherlock %>%
+  mutate(
+    linenumber = row_number(),
+    chapter = cumsum(str_detect(text, 
+                                regex("^[MCDXVI]+.$", 
+                                      ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+```
+
+Before we dig into the textbook's sentiment analysis, it's helpful to compare the length of these stories. Each adventure has similar word count, but fairly low. To ensure we get adequate sentiment signal, we'll drop the index length lower than the Austen example.
+
+```{r counts}
+sherlock_wordcount <- tidy_sherlock %>% 
+  group_by(adventure) %>%
+  mutate(wordcount = n()) %>%
+  select(adventure,wordcount) %>%
+  unique()
+
+print(sherlock_wordcount)
+```
+
+Now we can perform comparable sentiment analysis, first comparing Bing sentiment across adventures. At a high level, it looks like the first 3 adventures have higher sentiment than the remaining. 
+
+```{r sentiment}
+# Following the textbook, we use the 'Bing' lexicon to determine a sentiment score across 
+# each adventure.
+sherlock_sentiment <- tidy_sherlock %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(adventure, index = linenumber %/% 40, sentiment) %>% # we'll use the 80 index as well
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+# Then we can plot this for each novel to see sentiment across the plot.
+ggplot(sherlock_sentiment, aes(index, sentiment, fill = adventure)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~adventure, ncol = 2, scales = "free_x")
+```
+
+Then we'll compare across lexicons. We'll filter for the 8th adventure, The Adventure of the Speckled Band. The three look fairly comparable in sections, but with more extreme values for Bing.
+
+```{r lexi-compare}
+# First the textbook has us filter for the 8th adventure
+speckled_band <- tidy_sherlock %>% 
+  filter(adventure == 8)
+
+# Then we set up dataframes with an 40 line index and associated sentiment score, first using 
+# AFINN then Bing + NRC.
+afinn_sherlock <- speckled_band %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(index = linenumber %/% 40) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method = "AFINN")
+
+# Bing and NRC use binary sentiment vs AFINN's score so it requires different processing.
+bing_and_nrc_sherlock <- bind_rows(
+  speckled_band %>% 
+    inner_join(get_sentiments("bing")) %>%
+    mutate(method = "Bing et al."),
+  speckled_band %>% 
+    inner_join(get_sentiments("nrc") %>% 
+                 filter(sentiment %in% c("positive", 
+                                         "negative"))
+    ) %>%
+    mutate(method = "NRC")) %>%
+  count(method, index = linenumber %/% 40, sentiment) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+# Then we can use a similar plot to the above to compare the overall sentiment score from each
+# lexicon.
+bind_rows(afinn_sherlock, 
+          bing_and_nrc_sherlock) %>%
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y")
+```
+Then, we follow the textbook's pattern of counting words and displaying in a wordcloud.
+
+'well' is the most commonly occuring word.
+
+```{r occurrences}
+# The textbook counts instances of words, associating them with their Bing sentiment.
+bing_word_counts <- tidy_sherlock %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+# Then the book has us plot the ranked counts
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  slice_max(n, n = 10) %>% 
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(n, word, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(x = "Contribution to sentiment",
+       y = NULL)
+
+tidy_sherlock %>%
+  anti_join(stop_words) %>%
+  count(word) %>%
+  with(wordcloud(word, n, max.words = 100))
+
+# We can also configure a word cloud for negative words and positive words.
+tidy_sherlock %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = TRUE) %>%
+  acast(word ~ sentiment, value.var = "n", fill = 0) %>%
+  comparison.cloud(colors = c("gray20", "gray80"),
+                   max.words = 100)
+```
+
+Finally, the textbook demonstrates how to expand this approach beyond words to chapters, and we find that the 3rd chapter of Adventure 8 has the highest percentage of negative sentiment.
+
+```{r sherlock-sentences}
+# Within each book, we can see which chapters have the highest % of negative words, using Bing 
+# lexicon.
+bingnegative <- get_sentiments("bing") %>% 
+  filter(sentiment == "negative")
+
+# We want to get total wordcounts per chapter to create our denominator
+wordcounts <- tidy_sherlock %>%
+  group_by(adventure, chapter) %>%
+  summarize(words = n())
+
+tidy_sherlock %>%
+  semi_join(bingnegative) %>%
+  group_by(adventure, chapter) %>%
+  summarize(negativewords = n()) %>%
+  left_join(wordcounts, by = c("adventure", "chapter")) %>%
+  mutate(ratio = negativewords/words) %>%
+  filter(chapter != 0) %>%
+  slice_max(ratio, n = 1) %>% 
+  ungroup()
+```
+
+## Additional Lexicon
+
+As an additional extension, we can run this text through an additional lexicon. We'll be using the [Loughran lexicon](https://rdrr.io/cran/textdata/man/lexicon_loughran.html), which like Bing/NRC has a binary positive/negative score included. Then we can compare all 4.
+
+```{r loughran}
+# We'll use Loughran lexicon. Like Bing/NRC, it uses a binary score.
+loughran_sherlock <-
+  speckled_band %>% 
+    inner_join(get_sentiments("loughran") %>% 
+                 filter(sentiment %in% c("positive", 
+                                         "negative"))
+    ) %>%
+    mutate(method = "loughran") %>%
+  count(method, index = linenumber %/% 40, sentiment) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = n,
+              values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+# Then we can use a similar plot to the above to compare the overall sentiment score from each
+# lexicon.
+bind_rows(afinn_sherlock, 
+          bing_and_nrc_sherlock, 
+          loughran_sherlock) %>%
+  ggplot(aes(index, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y")
+```
